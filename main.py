@@ -17,7 +17,7 @@ INTERVAL = 0.05            # 松开后等待的时间（秒）
 
 # 要模拟的按键：F13 ~ F14，每个键一个独立线程
 # 想加更多就继续写，例如 [Key.f13, Key.f14, Key.f15, Key.f16]
-KEY_LIST = [Key.f13, Key.f14]
+KEY_LIST = [Key.f13, Key.f14, Key.f15, Key.f16,Key.f17,Key.f18,Key.f19,Key.f20,Key.f21,Key.f22,Key.f23,Key.f24]
 # =================================================
 
 
@@ -111,7 +111,7 @@ def on_press(key):
 
 
 def main():
-    print("BongoCat 刷点击器 V0.2（F13 / F14 多线程版）")
+    print("BongoCat 刷点击器 V0.2（多线程版）")
     print("将同时模拟：" + "、".join(str(k) for k in KEY_LIST))
     print("大部分电脑没有这些键，但无法保证不干扰其他软件。")
     print("请确保 BongoCat 已开启。")
@@ -122,7 +122,6 @@ def main():
 
     listener = Listener(on_press=on_press)
     listener.start()
-
     try:
         while not exit_program:
             time.sleep(0.1)
