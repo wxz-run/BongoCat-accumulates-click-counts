@@ -1,6 +1,22 @@
+# -*- coding: utf-8 -*-
+"""
+BongoCat 刷点击器 V0.3（Tkinter 窗口版）
+
+在原多线程脚本基础上加了图形界面：
+  - 勾选要模拟的按键（F13 ~ F24）
+  - 可调按住时长 / 间隔
+  - 窗口按钮 或 全局热键 F8 开始/停止
+  - 全局热键 ESC 退出
+
+依赖：pip install pynput
+"""
+
+import queue
 import sys
-import time
 import threading
+import time
+import tkinter as tk
+from tkinter import ttk, messagebox
 
 try:
     from pynput.keyboard import Controller, Key, Listener
@@ -9,128 +25,312 @@ except ImportError:
     sys.exit(1)
 
 
-# ==================== 可调参数 ====================
-PRESS_TIME = 0.05          # 按下后保持的时间（秒）
-INTERVAL = 0.05            # 松开后等待的时间（秒）
-# 单次周期 ≈ PRESS_TIME + INTERVAL ≈ 0.1 秒（和原版速度一致）
+# ==================== 可调参数（默认值） ====================
+DEFAULT_PRESS_TIME = 0.05   # 按下后保持的时间（秒）
+DEFAULT_INTERVAL = 0.05     # 松开后等待的时间（秒）
+# 单次周期 ≈ PRESS_TIME + INTERVAL ≈ 0.1 秒
 # 想更快就调小这两个值，但别小到 BongoCat 反应不过来
+# =========================================================
 
-# 要模拟的按键：F13 ~ F24，每个键一个独立线程
-# 想加更多就继续写，例如 [Key.f13, Key.f14, Key.f15, Key.f16]
-KEY_LIST = [Key.f13, Key.f14, Key.f15, Key.f16,Key.f17,Key.f18,Key.f19,Key.f20,Key.f21,Key.f22,Key.f23,Key.f24]
-# =================================================
-
-
-running = threading.Event()   # 置位 = 正在刷；清除 = 停止
-exit_program = False
-kb = Controller()
-threads = []
+# 可模拟的按键：名称 -> pynput 键
+ALL_KEYS = [
+    ("F13", Key.f13), ("F14", Key.f14), ("F15", Key.f15), ("F16", Key.f16),
+    ("F17", Key.f17), ("F18", Key.f18), ("F19", Key.f19), ("F20", Key.f20),
+    ("F21", Key.f21), ("F22", Key.f22), ("F23", Key.f23), ("F24", Key.f24),
+]
 
 
-def _sleep(seconds: float) -> bool:
-    """
-    可被中断的 sleep。
-    返回 True  = 睡满了
-    返回 False = 中途 running 被清掉，需要退出
-    """
-    deadline = time.perf_counter() + seconds
-    while time.perf_counter() < deadline:
-        if not running.is_set():
-            return False
-        time.sleep(0.001)
-    return running.is_set()
+# ==========================================================
+#                     连发引擎（纯逻辑，不碰 UI）
+# ==========================================================
+class AutoClicker:
+    """多线程按键连发引擎：每个按键一个独立线程。"""
 
+    def __init__(self):
+        self.kb = Controller()
+        self.running = threading.Event()   # 置位 = 正在刷；清除 = 停止
+        self.lock = threading.Lock()
+        self.threads = []
+        self.keys = []
+        self.press_time = DEFAULT_PRESS_TIME
+        self.interval = DEFAULT_INTERVAL
 
-def key_worker(key):
-    """单个按键的循环线程：按下 -> 保持 -> 松开 -> 等待 -> 循环"""
-    while running.is_set():
+    # ---------------- 内部工具 ----------------
+    def _sleep(self, seconds: float) -> bool:
+        """可被中断的 sleep。True = 睡满；False = 中途被停止。"""
+        deadline = time.perf_counter() + seconds
+        while time.perf_counter() < deadline:
+            if not self.running.is_set():
+                return False
+            time.sleep(0.001)
+        return self.running.is_set()
+
+    def _release(self, key):
+        """兜底释放，避免卡键。"""
         try:
-            kb.press(key)
-            if not _sleep(PRESS_TIME):
-                kb.release(key)
-                break
-            kb.release(key)
-            if not _sleep(INTERVAL):
-                break
-        except Exception as e:
-            print(f"> 线程 {key} 异常，已退出：{type(e).__name__}: {e}")
+            self.kb.release(key)
+        except Exception:
+            pass
+
+    def _worker(self, key, press_time: float, interval: float):
+        """单个按键的循环线程：按下 -> 保持 -> 松开 -> 等待 -> 循环。"""
+        while self.running.is_set():
             try:
-                kb.release(key)
+                self.kb.press(key)
+                if not self._sleep(press_time):
+                    self._release(key)
+                    break
+                self.kb.release(key)
+                if not self._sleep(interval):
+                    break
+            except Exception as e:
+                print(f"> 线程 {key} 异常，已退出：{type(e).__name__}: {e}")
+                self._release(key)
+                break
+
+    # ---------------- 对外接口 ----------------
+    @property
+    def is_running(self) -> bool:
+        return self.running.is_set()
+
+    def start(self, keys, press_time: float, interval: float) -> bool:
+        """启动所有按键线程。已在运行则返回 False。"""
+        with self.lock:
+            if self.running.is_set():
+                return False
+
+            self.keys = list(keys)
+            self.press_time = press_time
+            self.interval = interval
+            self.running.set()
+
+            self.threads = []
+            for key in self.keys:
+                t = threading.Thread(
+                    target=self._worker,
+                    args=(key, press_time, interval),   # 参数快照，避免竞态
+                    daemon=True,
+                    name=f"kb-{key}",
+                )
+                t.start()
+                self.threads.append(t)
+        return True
+
+    def stop(self):
+        """停止所有线程，并兜底释放按键。"""
+        with self.lock:
+            if not self.running.is_set() and not self.threads:
+                return
+            self.running.clear()
+            threads = self.threads
+            self.threads = []
+            keys = list(self.keys)
+
+        for t in threads:
+            t.join(timeout=0.3)
+
+        for key in keys:
+            self._release(key)
+
+
+# ==========================================================
+#                          窗口
+# ==========================================================
+class App:
+    def __init__(self, root: tk.Tk):
+        self.root = root
+        self.engine = AutoClicker()
+        self.msg_queue = queue.Queue()      # 监听线程 -> 主线程 的消息通道
+        self.key_vars = {}                  # 名称 -> (BooleanVar, key)
+        self.listener = None
+        self._closing = False
+
+        self._build_ui()
+        self._start_listener()
+
+        self.root.protocol("WM_DELETE_WINDOW", self.quit)
+        self.root.after(50, self._poll_queue)
+
+    # ---------------- 界面构建 ----------------
+    def _build_ui(self):
+        self.root.title("BongoCat 刷点击器 V0.3")
+        self.root.resizable(False, False)
+
+        main = ttk.Frame(self.root, padding=12)
+        main.grid(row=0, column=0, sticky="nsew")
+
+        ttk.Label(
+            main, text="BongoCat 刷点击器 V0.3", font=("", 12, "bold")
+        ).grid(row=0, column=0, columnspan=4, pady=(0, 10))
+
+        # ---- 参数 ----
+        pf = ttk.LabelFrame(main, text="参数", padding=10)
+        pf.grid(row=1, column=0, columnspan=4, sticky="ew", pady=4)
+
+        ttk.Label(pf, text="按住时长(秒)").grid(row=0, column=0, sticky="w")
+        self.press_var = tk.StringVar(value=str(DEFAULT_PRESS_TIME))
+        ttk.Entry(pf, textvariable=self.press_var, width=8, justify="center").grid(
+            row=0, column=1, padx=(6, 16)
+        )
+
+        ttk.Label(pf, text="间隔(秒)").grid(row=0, column=2, sticky="w")
+        self.interval_var = tk.StringVar(value=str(DEFAULT_INTERVAL))
+        ttk.Entry(pf, textvariable=self.interval_var, width=8, justify="center").grid(
+            row=0, column=3, padx=6
+        )
+
+        # ---- 按键选择 ----
+        kf = ttk.LabelFrame(main, text="模拟按键（可多选，大部分电脑没有这些键，勾选越少性能越好）", padding=10)
+        kf.grid(row=2, column=0, columnspan=4, sticky="ew", pady=4)
+
+        for i, (name, key) in enumerate(ALL_KEYS):
+            var = tk.BooleanVar(value=True)
+            self.key_vars[name] = (var, key)
+            ttk.Checkbutton(kf, text=name, variable=var).grid(
+                row=i // 4, column=i % 4, sticky="w", padx=6, pady=3
+            )
+
+        sel = ttk.Frame(main)
+        sel.grid(row=3, column=0, columnspan=4, sticky="w", pady=(2, 0))
+        ttk.Button(sel, text="全选", width=8, command=lambda: self._set_all(True)).grid(
+            row=0, column=0, padx=(0, 6)
+        )
+        ttk.Button(sel, text="全不选", width=8, command=lambda: self._set_all(False)).grid(
+            row=0, column=1
+        )
+        tip = ttk.Label(sel, text="（启动和结束时会卡一段时间）", foreground="#888").grid(row=0, column=2, padx=(12, 0))
+
+        # ---- 控制按钮 ----
+        cf = ttk.Frame(main)
+        cf.grid(row=4, column=0, columnspan=4, pady=(14, 4))
+
+        self.toggle_btn = ttk.Button(
+            cf, text="开始  (F8)", width=16, command=self.toggle
+        )
+        self.toggle_btn.grid(row=0, column=0, padx=6)
+
+        ttk.Button(cf, text="退出  (ESC)", width=16, command=self.quit).grid(
+            row=0, column=1, padx=6
+        )
+
+        # ---- 状态栏 ----
+        self.status_var = tk.StringVar(value="就绪　—　请确保 BongoCat 已开启")
+        ttk.Label(main, textvariable=self.status_var, foreground="#555").grid(
+            row=5, column=0, columnspan=4, pady=(10, 0)
+        )
+
+        ttk.Separator(main, orient="horizontal").grid(
+            row=6, column=0, columnspan=4, sticky="ew", pady=8
+        )
+        ttk.Label(
+            main,
+            text="全局热键：F8 开始/停止　ESC 退出",
+            foreground="#888",
+        ).grid(row=7, column=0, columnspan=4)
+
+    def _set_all(self, value: bool):
+        for var, _ in self.key_vars.values():
+            var.set(value)
+
+    # ---------------- 全局热键监听 ----------------
+    def _start_listener(self):
+        """pynput 监听器跑在自己的线程里，只往队列里丢消息。"""
+        def on_press(key):
+            if key == Key.f8:
+                self.msg_queue.put("toggle")
+            elif key == Key.esc:
+                self.msg_queue.put("quit")
+                return False        # 停止监听
+            return None
+
+        try:
+            self.listener = Listener(on_press=on_press)
+            self.listener.daemon = True
+            self.listener.start()
+        except Exception as e:
+            self.status_var.set(f"全局热键不可用：{type(e).__name__}: {e}")
+
+    def _poll_queue(self):
+        """主线程定时轮询消息队列（Tk 只能在主线程里操作）。"""
+        try:
+            while True:
+                msg = self.msg_queue.get_nowait()
+                if msg == "toggle":
+                    self.toggle()
+                elif msg == "quit":
+                    self.quit()
+                    return
+        except queue.Empty:
+            pass
+
+        if not self._closing:
+            self.root.after(50, self._poll_queue)
+
+    # ---------------- 开始 / 停止 ----------------
+    def toggle(self):
+        if self.engine.is_running:
+            self.stop()
+        else:
+            self.start()
+
+    def start(self):
+        # 校验参数
+        try:
+            press_time = float(self.press_var.get())
+            interval = float(self.interval_var.get())
+        except ValueError:
+            messagebox.showerror("参数错误", "“按住时长”和“间隔”必须是数字。")
+            return
+
+        if press_time < 0.001 or interval < 0.001:
+            messagebox.showerror("参数错误", "参数太小了，最小 0.001 秒。")
+            return
+
+        keys = [k for var, k in self.key_vars.values() if var.get()]
+        if not keys:
+            messagebox.showwarning("未选择按键", "请至少勾选一个按键。")
+            return
+
+        if self.engine.start(keys, press_time, interval):
+            self.toggle_btn.config(text="停止  (F8)")
+            names = [n for n, (v, _) in self.key_vars.items() if v.get()]
+            self.status_var.set(f"▶ 运行中")
+            self.root.title("BongoCat 刷点击器 V0.3 —— 运行中")
+
+    def stop(self):
+        self.engine.stop()
+        self.toggle_btn.config(text="开始  (F8)")
+        self.status_var.set("■ 已停止")
+        self.root.title("BongoCat 刷点击器 V0.3")
+
+    # ---------------- 退出 ----------------
+    def quit(self):
+        if self._closing:
+            return
+        self._closing = True
+
+        try:
+            if self.engine.is_running:
+                self.engine.stop()
+        except Exception:
+            pass
+
+        if self.listener is not None:
+            try:
+                self.listener.stop()
             except Exception:
                 pass
-            break
 
-
-def start_workers():
-    """为每个按键启动一个线程"""
-    global threads
-    running.set()
-    threads = []
-    for key in KEY_LIST:
-        t = threading.Thread(
-            target=key_worker,
-            args=(key,),
-            daemon=True,
-            name=f"kb-{key}",
-        )
-        t.start()
-        threads.append(t)
-
-
-def stop_workers():
-    """停止所有线程，并兜底释放按键，避免卡键"""
-    running.clear()
-    for t in threads:
-        t.join(timeout=0.3)
-    threads.clear()
-
-    for key in KEY_LIST:
         try:
-            kb.release(key)
+            self.root.destroy()
         except Exception:
             pass
 
 
-def on_press(key):
-    global exit_program
-
-    if key == Key.f8:
-        if not running.is_set():
-            start_workers()
-            print("▶ 开始")
-        else:
-            stop_workers()
-            print("■ 停止")
-
-    elif key == Key.esc:
-        if running.is_set():
-            stop_workers()
-        exit_program = True
-        print("退出")
-        return False   # 停止监听
-
-
 def main():
-    print("BongoCat 刷点击器 V0.2（多线程版）")
-    print("将同时模拟：" + "、".join(str(k) for k in KEY_LIST))
-    print("大部分电脑没有这些键，但无法保证不干扰其他软件。")
-    print("请确保 BongoCat 已开启。")
-    print("-" * 40)
-    print("F8  开始 / 停止")
-    print("ESC 退出")
-    print("-" * 40)
-
-    listener = Listener(on_press=on_press)
-    listener.start()
-    try:
-        while not exit_program:
-            time.sleep(0.1)
-    except KeyboardInterrupt:
-        print("\n> 用户中断")
-    finally:
-        if running.is_set():
-            stop_workers()
-        listener.stop()
+    root = tk.Tk()
+    App(root)
+    root.mainloop()
 
 
 if __name__ == "__main__":
