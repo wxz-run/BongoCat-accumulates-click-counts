@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-BongoCat刷点击器 V0.4(Tkinter 窗口版)
+BongoCat刷点击器 V0.3.1(Tkinter 窗口版)
 在 V0.3 基础上加入防溢出：
   - 每连续运行 60 秒，自动暂停 3 秒，然后继续
   - 其他功能完全不变
@@ -212,14 +212,14 @@ class App:
 
     # ---------------- 界面构建 ----------------
     def _build_ui(self):
-        self.root.title("BongoCat刷点击器 V0.4") #窗口标题
+        self.root.title("BongoCat刷点击器 V0.3.1") #窗口标题
         self.root.resizable(False, False)
 
         main = ttk.Frame(self.root, padding=10)
         main.grid(row=0, column=0, sticky="nsew")
 
         ttk.Label(
-            main, text="BongoCat刷点击器 V0.4", font=("", 12, "bold")
+            main, text="BongoCat刷点击器 V0.3.1", font=("", 12, "bold")
         ).grid(row=0, column=0, columnspan=4, pady=(0, 10))
 
         # ---- 参数 ----
@@ -239,7 +239,7 @@ class App:
         )
 
         # ---- 按键选择 ----
-        kf = ttk.LabelFrame(main, text="模拟按键(可多选,大部分电脑没有这些键,勾选越少性能越好)", padding=10)
+        kf = ttk.LabelFrame(main, text="模拟按键\n可多选,大部分电脑没有这些键,勾选越少性能越好", padding=10)
         kf.grid(row=2, column=0, columnspan=4, sticky="ew", pady=4)
 
         for i, (name, key) in enumerate(ALL_KEYS):
@@ -371,7 +371,7 @@ class App:
         self.engine.stop()
         self.toggle_btn.config(text="开始(F8)")
         self.status_var.set("■ 已停止")
-        self.root.title("BongoCat刷点击器 V0.4")
+        self.root.title("BongoCat刷点击器 V0.3.1")
 
     # ---------------- 退出 ----------------
     def quit(self):
