@@ -1,14 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-BongoCat 刷点击器 V0.3（Tkinter 窗口版）
-
-在原多线程脚本基础上加了图形界面：
-  - 勾选要模拟的按键（F13 ~ F24）
-  - 可调按住时长 / 间隔
-  - 窗口按钮 或 全局热键 F8 开始/停止
-  - 全局热键 ESC 退出
-
-依赖：pip install pynput
+BongoCat刷点击器 V0.4(Tkinter 窗口版)
+在 V0.3 基础上加入防溢出：
+  - 每连续运行 60 秒，自动暂停 3 秒，然后继续
+  - 其他功能完全不变
+依赖:pip install pynput
 """
 
 import queue
@@ -24,12 +20,12 @@ except ImportError:
     print("缺少 pynput，请先安装：pip install pynput")
     sys.exit(1)
 
-
 # ==================== 可调参数（默认值） ====================
-DEFAULT_PRESS_TIME = 0.05   # 按下后保持的时间（秒）
-DEFAULT_INTERVAL = 0.05     # 松开后等待的时间（秒）
-# 单次周期 ≈ PRESS_TIME + INTERVAL ≈ 0.1 秒
-# 想更快就调小这两个值，但别小到 BongoCat 反应不过来
+DEFAULT_PRESS_TIME = 0.025  # 按下后保持的时间（秒）
+DEFAULT_INTERVAL = 0.025    # 松开后等待的时间（秒）
+
+RUN_DURATION = 60.0         # 【新增】连续运行多少秒后暂停一次
+PAUSE_DURATION = 3.0        # 【新增】每次暂停多少秒（防溢出）
 # =========================================================
 
 # 可模拟的按键：名称 -> pynput 键
@@ -39,23 +35,32 @@ ALL_KEYS = [
     ("F21", Key.f21), ("F22", Key.f22), ("F23", Key.f23), ("F24", Key.f24),
 ]
 
-
-# ==========================================================
-#                     连发引擎（纯逻辑，不碰 UI）
-# ==========================================================
+#连发引擎（纯逻辑，不碰 UI）
 class AutoClicker:
     """多线程按键连发引擎：每个按键一个独立线程。"""
 
-    def __init__(self):
+    def __init__(self, notify=None):
         self.kb = Controller()
         self.running = threading.Event()   # 置位 = 正在刷；清除 = 停止
+        self.paused = threading.Event()    # 【新增】置位 = 暂停中（防溢出）
         self.lock = threading.Lock()
         self.threads = []
+        self.watchdog_thread = None        # 【新增】防溢出计时线程
         self.keys = []
         self.press_time = DEFAULT_PRESS_TIME
         self.interval = DEFAULT_INTERVAL
+        self.notify = notify               # 【新增】通知 UI 的回调（可选）
 
-    # ---------------- 内部工具 ----------------
+    #内部工具
+    def _notify(self, msg):
+        """【新增】向 UI 线程发消息，出错就忽略。"""
+        if self.notify is None:
+            return
+        try:
+            self.notify(msg)
+        except Exception:
+            pass
+
     def _sleep(self, seconds: float) -> bool:
         """可被中断的 sleep。True = 睡满；False = 中途被停止。"""
         deadline = time.perf_counter() + seconds
@@ -63,6 +68,12 @@ class AutoClicker:
             if not self.running.is_set():
                 return False
             time.sleep(0.001)
+        return self.running.is_set()
+
+    def _wait_unpaused(self) -> bool:
+        """【新增】暂停时在此等待。True = 可以继续；False = 已被停止。"""
+        while self.running.is_set() and self.paused.is_set():
+            time.sleep(0.005)
         return self.running.is_set()
 
     def _release(self, key):
@@ -75,6 +86,10 @@ class AutoClicker:
     def _worker(self, key, press_time: float, interval: float):
         """单个按键的循环线程：按下 -> 保持 -> 松开 -> 等待 -> 循环。"""
         while self.running.is_set():
+            # 【新增】暂停期间不产生任何按键
+            if not self._wait_unpaused():
+                break
+
             try:
                 self.kb.press(key)
                 if not self._sleep(press_time):
@@ -88,13 +103,47 @@ class AutoClicker:
                 self._release(key)
                 break
 
+    def _watchdog(self):
+        """【新增】防溢出计时线程：运行 RUN_DURATION 秒 -> 暂停 PAUSE_DURATION 秒 -> 循环。"""
+        while self.running.is_set():
+            # ---- 运行阶段 ----
+            deadline = time.perf_counter() + RUN_DURATION
+            while time.perf_counter() < deadline:
+                if not self.running.is_set():
+                    return
+                time.sleep(0.05)
+
+            if not self.running.is_set():
+                return
+
+            # ---- 暂停阶段 ----
+            self.paused.set()
+            self._notify("paused")
+
+            deadline = time.perf_counter() + PAUSE_DURATION
+            while time.perf_counter() < deadline:
+                if not self.running.is_set():
+                    break
+                time.sleep(0.02)
+
+            self.paused.clear()
+
+            if self.running.is_set():
+                self._notify("resumed")
+            else:
+                return
+
     # ---------------- 对外接口 ----------------
     @property
     def is_running(self) -> bool:
         return self.running.is_set()
 
+    @property
+    def is_paused(self) -> bool:
+        return self.paused.is_set()
+
     def start(self, keys, press_time: float, interval: float) -> bool:
-        """启动所有按键线程。已在运行则返回 False。"""
+        """启动所有按键线程 + 防溢出计时线程。已在运行则返回 False。"""
         with self.lock:
             if self.running.is_set():
                 return False
@@ -102,6 +151,7 @@ class AutoClicker:
             self.keys = list(keys)
             self.press_time = press_time
             self.interval = interval
+            self.paused.clear()
             self.running.set()
 
             self.threads = []
@@ -114,6 +164,12 @@ class AutoClicker:
                 )
                 t.start()
                 self.threads.append(t)
+
+            # 【新增】启动防溢出计时线程
+            self.watchdog_thread = threading.Thread(
+                target=self._watchdog, daemon=True, name="watchdog"
+            )
+            self.watchdog_thread.start()
         return True
 
     def stop(self):
@@ -122,25 +178,28 @@ class AutoClicker:
             if not self.running.is_set() and not self.threads:
                 return
             self.running.clear()
+            self.paused.clear()          # 【新增】解除暂停，让线程立刻退出
             threads = self.threads
             self.threads = []
+            watchdog = self.watchdog_thread
+            self.watchdog_thread = None
             keys = list(self.keys)
 
         for t in threads:
             t.join(timeout=0.3)
+        if watchdog is not None:
+            watchdog.join(timeout=0.3)
 
         for key in keys:
             self._release(key)
 
-
-# ==========================================================
-#                          窗口
-# ==========================================================
+#窗口
 class App:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.engine = AutoClicker()
         self.msg_queue = queue.Queue()      # 监听线程 -> 主线程 的消息通道
+        # 【新增】把 engine 的通知也丢进同一个队列，统一在主线程处理
+        self.engine = AutoClicker(notify=self.msg_queue.put)
         self.key_vars = {}                  # 名称 -> (BooleanVar, key)
         self.listener = None
         self._closing = False
@@ -153,14 +212,14 @@ class App:
 
     # ---------------- 界面构建 ----------------
     def _build_ui(self):
-        self.root.title("BongoCat 刷点击器 V0.3")
+        self.root.title("BongoCat刷点击器 V0.4") #窗口标题
         self.root.resizable(False, False)
 
-        main = ttk.Frame(self.root, padding=12)
+        main = ttk.Frame(self.root, padding=10)
         main.grid(row=0, column=0, sticky="nsew")
 
         ttk.Label(
-            main, text="BongoCat 刷点击器 V0.3", font=("", 12, "bold")
+            main, text="BongoCat刷点击器 V0.4", font=("", 12, "bold")
         ).grid(row=0, column=0, columnspan=4, pady=(0, 10))
 
         # ---- 参数 ----
@@ -180,7 +239,7 @@ class App:
         )
 
         # ---- 按键选择 ----
-        kf = ttk.LabelFrame(main, text="模拟按键（可多选，大部分电脑没有这些键，勾选越少性能越好）", padding=10)
+        kf = ttk.LabelFrame(main, text="模拟按键(可多选,大部分电脑没有这些键,勾选越少性能越好)", padding=10)
         kf.grid(row=2, column=0, columnspan=4, sticky="ew", pady=4)
 
         for i, (name, key) in enumerate(ALL_KEYS):
@@ -198,33 +257,35 @@ class App:
         ttk.Button(sel, text="全不选", width=8, command=lambda: self._set_all(False)).grid(
             row=0, column=1
         )
-        tip = ttk.Label(sel, text="（启动和结束时会卡一段时间）", foreground="#888").grid(row=0, column=2, padx=(12, 0))
+        
 
         # ---- 控制按钮 ----
         cf = ttk.Frame(main)
         cf.grid(row=4, column=0, columnspan=4, pady=(14, 4))
 
         self.toggle_btn = ttk.Button(
-            cf, text="开始  (F8)", width=16, command=self.toggle
+            cf, text="开始(F8)", width=16, command=self.toggle
         )
         self.toggle_btn.grid(row=0, column=0, padx=6)
 
-        ttk.Button(cf, text="退出  (ESC)", width=16, command=self.quit).grid(
+        ttk.Button(cf, text="退出(ESC)", width=16, command=self.quit).grid(
             row=0, column=1, padx=6
         )
-
+        
         # ---- 状态栏 ----
-        self.status_var = tk.StringVar(value="就绪　—　请确保 BongoCat 已开启")
+        self.status_var = tk.StringVar(value="·就绪，请确保 BongoCat 已开启")
         ttk.Label(main, textvariable=self.status_var, foreground="#555").grid(
             row=5, column=0, columnspan=4, pady=(10, 0)
         )
+        
+        tip = ttk.Label(sel, text="(tip:结束时会卡一段时间)", foreground="#888").grid(row=0, column=2, padx=(12, 0))
 
         ttk.Separator(main, orient="horizontal").grid(
             row=6, column=0, columnspan=4, sticky="ew", pady=8
         )
         ttk.Label(
             main,
-            text="全局热键：F8 开始/停止　ESC 退出",
+            text=f"   全局热键:F8开始/停止;ESC退出\n(每运行 {RUN_DURATION:.0f} 秒自动暂停 {PAUSE_DURATION:.0f} 秒防溢出)",
             foreground="#888",
         ).grid(row=7, column=0, columnspan=4)
 
@@ -232,7 +293,7 @@ class App:
         for var, _ in self.key_vars.values():
             var.set(value)
 
-    # ---------------- 全局热键监听 ----------------
+    #全局热键监听
     def _start_listener(self):
         """pynput 监听器跑在自己的线程里，只往队列里丢消息。"""
         def on_press(key):
@@ -260,6 +321,15 @@ class App:
                 elif msg == "quit":
                     self.quit()
                     return
+                # 【新增】防溢出状态反馈
+                elif msg == "paused":
+                    if self.engine.is_running:
+                        self.status_var.set(
+                            f"⏸ 暂停中（防溢出，{PAUSE_DURATION:.0f} 秒后自动继续）…"
+                        )
+                elif msg == "resumed":
+                    if self.engine.is_running:
+                        self.status_var.set("▶ 运行中")
         except queue.Empty:
             pass
 
@@ -292,16 +362,16 @@ class App:
             return
 
         if self.engine.start(keys, press_time, interval):
-            self.toggle_btn.config(text="停止  (F8)")
+            self.toggle_btn.config(text="停止(F8)")
             names = [n for n, (v, _) in self.key_vars.items() if v.get()]
             self.status_var.set(f"▶ 运行中")
-            self.root.title("BongoCat 刷点击器 V0.3 —— 运行中")
+            self.root.title("运行中")
 
     def stop(self):
         self.engine.stop()
-        self.toggle_btn.config(text="开始  (F8)")
+        self.toggle_btn.config(text="开始(F8)")
         self.status_var.set("■ 已停止")
-        self.root.title("BongoCat 刷点击器 V0.3")
+        self.root.title("BongoCat刷点击器 V0.4")
 
     # ---------------- 退出 ----------------
     def quit(self):
