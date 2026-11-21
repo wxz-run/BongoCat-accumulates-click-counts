@@ -6,7 +6,6 @@ from pynput.mouse import Controller, Button, Listener as MouseListener
 from pynput import keyboard
 
 
-# 预设：(名称, CPS, 按住时长(毫秒), 说明)
 PRESETS = [
     ("自定义",   10.0,  10.0, "恢复为默认参数（10 CPS / 10 ms）"),
     ("网页连点", 15.0,   5.0, "高频、极短按住，适合翻页 / 点赞"),
@@ -20,7 +19,7 @@ class AutoClicker:
     def __init__(self, root):
         self.root = root
         self.root.title("自动点击器")
-        self.root.geometry("280x285")
+        self.root.geometry("280x320")
         self.root.resizable(False, False)
         self.root.attributes("-topmost", True)
 
@@ -40,15 +39,16 @@ class AutoClicker:
         self.hold_var = tk.StringVar(value="10")
         self._suppress_trace = False
 
-        # 启动键：可以是 keyboard.Key / keyboard.KeyCode / mouse.Button
         self.start_key = keyboard.Key.f8
         self.start_key_name = "F8"
-        self.capturing = False
+        self.stop_key = keyboard.Key.f8
+        self.stop_key_name = "F8"
 
-        # 置顶
+        self.capturing = False
+        self.capture_target = None
+
         self.topmost_var = tk.BooleanVar(value=True)
 
-        # 悬浮球引用
         self.ball_window = None
         self.ball_canvas = None
         self.ball_circle = None
@@ -56,6 +56,7 @@ class AutoClicker:
 
         self._build_ui()
         self._setup_hotkeys()
+        self._show_ball()
         self.root.protocol("WM_DELETE_WINDOW", self.quit)
 
     # ==================== 主界面 ====================
@@ -88,30 +89,46 @@ class AutoClicker:
             row=2, column=1, sticky="e", pady=(4, 0)
         )
 
-        key_row = ttk.Frame(main)
-        key_row.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(4, 0))
-        ttk.Label(key_row, text="启动键:").pack(side="left")
-        self.key_label = ttk.Label(key_row, text=self.start_key_name, foreground="blue")
-        self.key_label.pack(side="left", padx=(2, 0))
+        start_row = ttk.Frame(main)
+        start_row.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        ttk.Label(start_row, text="启动键:").pack(side="left")
+        self.start_key_label = ttk.Label(
+            start_row, text=self.start_key_name, foreground="blue"
+        )
+        self.start_key_label.pack(side="left", padx=(2, 0))
         ttk.Button(
-            key_row, text="更改", width=6, command=self.start_capture
+            start_row, text="更改", width=6,
+            command=lambda: self._begin_capture("start"),
         ).pack(side="right")
 
-        self.btn = ttk.Button(main, text="开始 (F8)", command=self.toggle)
-        self.btn.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        stop_row = ttk.Frame(main)
+        stop_row.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        ttk.Label(stop_row, text="停止键:").pack(side="left")
+        self.stop_key_label = ttk.Label(
+            stop_row, text=self.stop_key_name, foreground="blue"
+        )
+        self.stop_key_label.pack(side="left", padx=(2, 0))
+        ttk.Button(
+            stop_row, text="更改", width=6,
+            command=lambda: self._begin_capture("stop"),
+        ).pack(side="right")
+
+        # 主窗口按钮：只出现在空闲态，点击 = 进入运行
+        self.btn = ttk.Button(main, text="启动 (F8)", command=self.start)
+        self.btn.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
         self.status = ttk.Label(main, text="状态: 已停止", foreground="red")
-        self.status.grid(row=5, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        self.status.grid(row=6, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         ttk.Checkbutton(
             main, text="始终置顶", variable=self.topmost_var,
             command=self._on_topmost_toggle,
-        ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         self.hint_label = ttk.Label(
-            main, text="F8 启停   F9 暂停   ESC 退出", foreground="gray"
+            main, text="F8 启动/暂停   ESC 退出", foreground="gray"
         )
-        self.hint_label.grid(row=7, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        self.hint_label.grid(row=8, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         self.cps_var.trace_add("write", self._on_param_edited)
         self.hold_var.trace_add("write", self._on_param_edited)
@@ -141,71 +158,82 @@ class AutoClicker:
         self._suppress_trace = False
         self.preset_label.config(text=name)
 
-    # ==================== 启动键捕获 ====================
-    def start_capture(self):
-        if self.capturing:
-            # 捕获中再次点「更改」→ 取消
-            self.capturing = False
-            self.key_label.config(text=self.start_key_name, foreground="blue")
+    # ==================== 按键捕获 ====================
+    def _begin_capture(self, target):
+        if self.capturing and self.capture_target == target:
+            self._cancel_capture()
             return
         self.capturing = True
-        self.key_label.config(text="按下按键…", foreground="orange")
+        self.capture_target = target
+        self.start_key_label.config(text=self.start_key_name, foreground="blue")
+        self.stop_key_label.config(text=self.stop_key_name, foreground="blue")
+        label = (
+            self.start_key_label if target == "start" else self.stop_key_label
+        )
+        label.config(text="按下按键…", foreground="orange")
         self.root.lift()
         self.root.focus_force()
 
+    def _cancel_capture(self):
+        self.capturing = False
+        self.capture_target = None
+        self.start_key_label.config(text=self.start_key_name, foreground="blue")
+        self.stop_key_label.config(text=self.stop_key_name, foreground="blue")
+
+    def _show_capture_hint(self, target, msg):
+        label = (
+            self.start_key_label if target == "start" else self.stop_key_label
+        )
+        label.config(text=msg, foreground="orange")
+
+        def restore():
+            if self.capturing and self.capture_target == target:
+                label.config(text="按下按键…", foreground="orange")
+
+        self.root.after(1500, restore)
+
     def _handle_capture(self, key):
-        """统一处理捕获（键盘或鼠标按键）"""
-        # ESC 取消
+        target = self.capture_target
+        if target is None:
+            return
         if key == keyboard.Key.esc:
-            self.capturing = False
-            self.key_label.config(text=self.start_key_name, foreground="blue")
+            self._cancel_capture()
             return
-        # F9 保留给暂停，不允许
         if key == keyboard.Key.f9:
-            self.key_label.config(text="F9 已占用，请换一个…", foreground="orange")
-            self.root.after(1500, self._restore_capture_hint)
+            self._show_capture_hint(target, "F9 已占用，请换一个…")
             return
-        # 左键拒绝（会与界面按钮自相干扰）
         if isinstance(key, Button) and key == Button.left:
-            self.key_label.config(
-                text="左键不可用，请换一个…", foreground="orange"
-            )
-            self.root.after(1500, self._restore_capture_hint)
+            self._show_capture_hint(target, "左键不可用，请换一个…")
             return
 
-        # 接受为新启动键
-        self.start_key = key
-        self.start_key_name = self._key_display_name(key)
+        name = self._key_display_name(key)
+        if target == "start":
+            self.start_key = key
+            self.start_key_name = name
+            self.start_key_label.config(text=name, foreground="blue")
+        else:
+            self.stop_key = key
+            self.stop_key_name = name
+            self.stop_key_label.config(text=name, foreground="blue")
+
         self.capturing = False
-        self.key_label.config(text=self.start_key_name, foreground="blue")
+        self.capture_target = None
         self._refresh_button_and_hint()
 
-    def _restore_capture_hint(self):
-        if self.capturing:
-            self.key_label.config(text="按下按键…", foreground="orange")
-
     def _key_display_name(self, key):
-        # 鼠标按键
         if isinstance(key, Button):
-            mapping = {
-                Button.middle: "中键",
-                Button.right: "右键",
-            }
+            mapping = {Button.middle: "中键", Button.right: "右键"}
             if key in mapping:
                 return mapping[key]
-            name = key.name  # 'x1', 'x2', 'button8', ...
+            name = key.name
             if name.startswith("x"):
                 return f"侧键{name[1:]}"
             if name.startswith("button"):
                 n = name[6:]
-                if n == "8":
-                    return "侧键1"
-                if n == "9":
-                    return "侧键2"
+                if n == "8": return "侧键1"
+                if n == "9": return "侧键2"
                 return f"鼠标{n}"
             return f"鼠标-{name}"
-
-        # 键盘功能键
         if isinstance(key, keyboard.Key):
             name = key.name
             for suffix in ("_l", "_r"):
@@ -213,8 +241,6 @@ class AutoClicker:
                     name = name[: -len(suffix)]
                     break
             return name.upper()
-
-        # 字符键
         if isinstance(key, keyboard.KeyCode):
             if key.char:
                 return key.char.upper()
@@ -225,7 +251,6 @@ class AutoClicker:
     def _keys_equal(self, k1, k2):
         if k1 is k2:
             return True
-        # 鼠标按键只与鼠标按键比较（Key 和 Button 都是 Enum，要防串比）
         if isinstance(k1, Button) or isinstance(k2, Button):
             return isinstance(k1, Button) and isinstance(k2, Button) and k1 == k2
         if isinstance(k1, keyboard.Key) and isinstance(k2, keyboard.Key):
@@ -238,12 +263,19 @@ class AutoClicker:
             return k1.vk is not None and k1.vk == k2.vk
         return False
 
+    def _is_toggle_mode(self):
+        return self._keys_equal(self.start_key, self.stop_key)
+
     def _refresh_button_and_hint(self):
-        action = "停止" if self.running else "开始"
-        self.btn.config(text=f"{action} ({self.start_key_name})")
-        self.hint_label.config(
-            text=f"{self.start_key_name} 启停   F9 暂停   ESC 退出"
-        )
+        self.btn.config(text=f"启动 ({self.start_key_name})")
+        if self._is_toggle_mode():
+            hint = f"{self.start_key_name} 启动/暂停   F9 暂停   ESC 退出"
+        else:
+            hint = (
+                f"{self.start_key_name} 启动/结束   "
+                f"{self.stop_key_name} 暂停   ESC 退出"
+            )
+        self.hint_label.config(text=hint)
 
     # ==================== 预设弹窗 ====================
     def open_preset_window(self):
@@ -298,7 +330,7 @@ class AutoClicker:
         else:
             var.set(True)
 
-    # ==================== 悬浮球 ====================
+    # ==================== 悬浮球（常驻） ====================
     def _show_ball(self):
         if self.ball_window is not None and self.ball_window.winfo_exists():
             return
@@ -323,15 +355,15 @@ class AutoClicker:
         canvas.pack()
 
         circle = canvas.create_oval(
-            2, 2, size - 2, size - 2, fill="#3498db", outline="white", width=2
+            2, 2, size - 2, size - 2, fill="#7f8c8d", outline="white", width=2
         )
         canvas.create_text(
-            size // 2, 20, text="CPS", fill="white",
+            size // 2, 18, text="CPS", fill="white",
             font=("Arial", 7, "bold")
         )
         value_item = canvas.create_text(
-            size // 2, 40, text=f"{self.cps:g}", fill="white",
-            font=("Arial", 14, "bold")
+            size // 2, 40, text="⏸", fill="white",
+            font=("Segoe UI Symbol", 16, "bold")
         )
 
         sw = win.winfo_screenwidth()
@@ -352,16 +384,19 @@ class AutoClicker:
         def on_drag(e):
             if abs(e.x_root - state["sx"]) + abs(e.y_root - state["sy"]) > 3:
                 state["moved"] = True
-            nx = e.x_root - state["ox"]
-            ny = e.y_root - state["oy"]
-            win.geometry(f"+{nx}+{ny}")
+            win.geometry(f"+{e.x_root - state['ox']}+{e.y_root - state['oy']}")
 
         def on_release(e):
-            if not state["moved"]:
-                self.stop()
+            if state["moved"]:
+                return
+            # 三态切换：空闲 → 运行 → 暂停 → 运行 ...
+            if not self.running:
+                self.start()
+            else:
+                self.toggle_pause()
 
         def on_right_click(e):
-            self.quit()
+            self._popup_context_menu(win, e)
 
         for w in (win, canvas):
             w.bind("<Button-1>", on_press)
@@ -374,10 +409,28 @@ class AutoClicker:
         self.ball_circle = circle
         self.ball_value_item = value_item
 
-        if self.paused:
-            self._update_ball_visual()
+        self._update_ball_visual()
+
+    def _popup_context_menu(self, win, event):
+        menu = tk.Menu(win, tearoff=0)
+        if not self.running:
+            menu.add_command(label="启动", command=self.start)
         else:
-            self._pulse_ball()
+            if self.paused:
+                menu.add_command(label="继续", command=self.toggle_pause)
+            else:
+                menu.add_command(label="暂停", command=self.toggle_pause)
+            menu.add_command(label="结束运行（显示主窗口）", command=self.stop)
+        menu.add_separator()
+        menu.add_command(label="退出程序", command=self.quit)
+
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                menu.grab_release()
+            except Exception:
+                pass
 
     def _update_ball_visual(self):
         if self.ball_canvas is None or self.ball_window is None:
@@ -388,12 +441,20 @@ class AutoClicker:
         except tk.TclError:
             return
 
-        if self.paused:
-            self.ball_canvas.itemconfig(self.ball_circle, fill="#f39c12")
-            self.ball_canvas.itemconfig(self.ball_value_item, text="II")
+        if not self.running:
+            fill, text, font = "#7f8c8d", "⏸", ("Segoe UI Symbol", 16, "bold")
+        elif self.paused:
+            fill, text, font = "#f39c12", "⏸", ("Segoe UI Symbol", 16, "bold")
         else:
-            self.ball_canvas.itemconfig(self.ball_circle, fill="#3498db")
-            self.ball_canvas.itemconfig(self.ball_value_item, text=f"{self.cps:g}")
+            fill, text, font = "#3498db", f"{self.cps:g}", ("Arial", 14, "bold")
+
+        try:
+            self.ball_canvas.itemconfig(self.ball_circle, fill=fill)
+            self.ball_canvas.itemconfig(
+                self.ball_value_item, text=text, font=font
+            )
+        except tk.TclError:
+            return
 
     def _pulse_ball(self):
         if self.ball_window is None:
@@ -427,47 +488,66 @@ class AutoClicker:
         self.ball_circle = None
         self.ball_value_item = None
 
-    # ==================== 全局热键（键盘 + 鼠标） ====================
+    # ==================== 全局热键 ====================
     def _setup_hotkeys(self):
-        # 键盘
         self.listener = keyboard.Listener(on_press=self.on_press)
         self.listener.daemon = True
         self.listener.start()
 
-        # 鼠标（侧键 / 中键 / 右键需要这里）
         self.mouse_listener = MouseListener(on_click=self.on_click)
         self.mouse_listener.daemon = True
         self.mouse_listener.start()
 
-    def on_press(self, key):
-        """键盘回调"""
+    def _dispatch_key(self, key):
         if self.capturing:
-            self.root.after(0, lambda k=key: self._handle_capture(k))
+            self._handle_capture(key)
             return
-        if self._keys_equal(key, self.start_key):
-            self.root.after(0, self.toggle)
-        elif key == keyboard.Key.f9:
-            self.root.after(0, self.toggle_pause)
-        elif key == keyboard.Key.esc:
-            self.root.after(0, self._on_esc)
+
+        # F9 暂停 / ESC 退出优先
+        if key == keyboard.Key.f9:
+            self.toggle_pause()
+            return
+        if key == keyboard.Key.esc:
+            self._on_esc()
+            return
+
+        is_start = self._keys_equal(key, self.start_key)
+        is_stop = self._keys_equal(key, self.stop_key)
+
+        if not (is_start or is_stop):
+            return
+
+        if self._is_toggle_mode():
+            # 启停同键：三态循环（空闲→运行→暂停→运行...），永不自动回主窗口
+            if not self.running:
+                self.start()
+            else:
+                self.toggle_pause()
+        else:
+            # 启停分离
+            if is_start:
+                if not self.running:
+                    self.start()
+                else:
+                    self.stop()          # 结束运行 → 显示主窗口
+            elif is_stop:
+                if self.running:
+                    self.toggle_pause()  # 运行↔暂停（不显示主窗口）
+
+    def on_press(self, key):
+        self.root.after(0, lambda k=key: self._dispatch_key(k))
 
     def on_click(self, x, y, button, pressed):
-        """鼠标回调（press 和 release 都会调用，只处理 press）"""
         if not pressed:
             return
-        if self.capturing:
-            self.root.after(0, lambda b=button: self._handle_capture(b))
-            return
-        if self._keys_equal(button, self.start_key):
-            self.root.after(0, self.toggle)
+        self.root.after(0, lambda b=button: self._dispatch_key(b))
 
     def _on_esc(self):
         if self.preset_window is not None and self.preset_window.winfo_exists():
             self.preset_window.destroy()
             self.preset_window = None
         elif self.capturing:
-            self.capturing = False
-            self.key_label.config(text=self.start_key_name, foreground="blue")
+            self._cancel_capture()
         else:
             self.quit()
 
@@ -479,26 +559,23 @@ class AutoClicker:
 
         if self.paused:
             self.status.config(
-                text="状态: 已暂停（按 F9 继续）", foreground="orange"
+                text="状态: 已暂停（按停止键/F9继续）", foreground="orange"
             )
-            self._update_ball_visual()
         else:
             self.status.config(
                 text=f"运行中 [{self.current_preset or '手动调整'}]  "
                      f"{self.cps:g} CPS / {self.hold*1000:.1f} ms",
                 foreground="green",
             )
-            self._update_ball_visual()
+        self._update_ball_visual()
+        if not self.paused:
             self._pulse_ball()
 
-    # ==================== 开始 / 停止 ====================
-    def toggle(self):
-        if self.running:
-            self.stop()
-        else:
-            self.start()
-
+    # ==================== 启动 / 结束运行 ====================
     def start(self):
+        if self.running:
+            return
+
         if self.preset_window is not None and self.preset_window.winfo_exists():
             try:
                 self.preset_window.destroy()
@@ -538,32 +615,35 @@ class AutoClicker:
         self.interval = interval
         self.hold = hold
         self.paused = False
-
         self.running = True
-        self.btn.config(text=f"停止 ({self.start_key_name})")
+
         self.status.config(
             text=f"运行中 [{self.current_preset or '手动调整'}]  "
                  f"{cps:g} CPS / {hold*1000:.1f} ms",
             foreground="green",
         )
+        self._refresh_button_and_hint()
 
         self.click_thread = threading.Thread(target=self.click_loop, daemon=True)
         self.click_thread.start()
 
+        # 隐藏主窗口（悬浮球保持常驻）
         self.root.withdraw()
-        self._show_ball()
+        self._update_ball_visual()
+        self._pulse_ball()
 
     def stop(self):
+        """结束运行：回到空闲状态并显示主窗口"""
         self.running = False
         self.paused = False
-        self._hide_ball()
         try:
             self.root.deiconify()
             self.root.lift()
         except tk.TclError:
             pass
         self.status.config(text="状态: 已停止", foreground="red")
-        self.btn.config(text=f"开始 ({self.start_key_name})")
+        self._refresh_button_and_hint()
+        self._update_ball_visual()
 
     # ==================== 点击循环 ====================
     def click_loop(self):
