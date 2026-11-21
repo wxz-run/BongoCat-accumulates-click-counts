@@ -20,7 +20,7 @@ class AutoClicker:
     def __init__(self, root):
         self.root = root
         self.root.title("自动点击器")
-        self.root.geometry("380x345")
+        self.root.geometry("280x225")
         self.root.resizable(False, False)
         self.root.attributes("-topmost", True)
 
@@ -33,7 +33,7 @@ class AutoClicker:
 
         self.current_preset = "自定义"
         self.preset_window = None
-        self.preset_vars = []       # [(name, BooleanVar, cps, hold), ...]
+        self.preset_vars = []
 
         self.cps_var = tk.StringVar(value="10")
         self.hold_var = tk.StringVar(value="10")
@@ -43,42 +43,51 @@ class AutoClicker:
         self._setup_hotkeys()
         self.root.protocol("WM_DELETE_WINDOW", self.quit)
 
-    # ==================== 主界面 ====================
+    # ==================== 主界面（紧凑） ====================
     def _build_ui(self):
-        main = ttk.Frame(self.root, padding=14)
+        main = ttk.Frame(self.root, padding=8)
         main.pack(fill="both", expand=True)
+        main.columnconfigure(1, weight=1)
 
         # —— 预设行 ——
         preset_row = ttk.Frame(main)
-        preset_row.pack(fill="x", pady=(0, 12))
+        preset_row.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        ttk.Label(preset_row, text="预设:").pack(side="left")
+        self.preset_label = ttk.Label(
+            preset_row, text=self.current_preset, foreground="blue"
+        )
+        self.preset_label.pack(side="left", padx=(2, 0))
+        ttk.Button(
+            preset_row, text="选择…", width=6,
+            command=self.open_preset_window,
+        ).pack(side="right")
 
-        ttk.Label(preset_row, text="当前预设：").pack(side="left")
-        self.preset_label = ttk.Label(preset_row, text=self.current_preset, foreground="blue")
-        self.preset_label.pack(side="left")
-        ttk.Button(preset_row, text="选择预设…", command=self.open_preset_window).pack(side="right")
-
-        # —— CPS ——
-        ttk.Label(main, text="每秒点击次数 (CPS):").pack(anchor="w")
-        ttk.Entry(main, textvariable=self.cps_var).pack(fill="x", pady=(4, 10))
+        # —— CPS（标签+输入框同一行）——
+        ttk.Label(main, text="CPS:").grid(row=1, column=0, sticky="w")
+        ttk.Entry(main, textvariable=self.cps_var, width=8).grid(
+            row=1, column=1, sticky="e"
+        )
 
         # —— 按住时长 ——
-        ttk.Label(main, text="按住时长 (毫秒):").pack(anchor="w")
-        ttk.Entry(main, textvariable=self.hold_var).pack(fill="x", pady=(4, 10))
+        ttk.Label(main, text="按住(ms):").grid(
+            row=2, column=0, sticky="w", pady=(4, 0)
+        )
+        ttk.Entry(main, textvariable=self.hold_var, width=8).grid(
+            row=2, column=1, sticky="e", pady=(4, 0)
+        )
 
         # —— 开始 / 停止 ——
         self.btn = ttk.Button(main, text="开始 (F8)", command=self.toggle)
-        self.btn.pack(fill="x")
+        self.btn.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
         # —— 状态 ——
         self.status = ttk.Label(main, text="状态: 已停止", foreground="red")
-        self.status.pack(anchor="w", pady=(10, 0))
+        self.status.grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
-        # —— 热键提示 ——
+        # —— 热键提示（合并成一行）——
         ttk.Label(
-            main,
-            text="F8: 开始 / 停止     ESC: 退出程序",
-            foreground="gray",
-        ).pack(anchor="w", pady=(8, 0))
+            main, text="F8 开始/停止    ESC 退出", foreground="gray"
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         # 手动编辑参数 -> 预设标签变成「手动调整」
         self.cps_var.trace_add("write", self._on_param_edited)
@@ -99,9 +108,8 @@ class AutoClicker:
         self._suppress_trace = False
         self.preset_label.config(text=name)
 
-    # ==================== 预设弹窗 ====================
+    # ==================== 预设弹窗（与主窗口大小无关） ====================
     def open_preset_window(self):
-        # 已打开就聚焦，避免重复创建
         if self.preset_window is not None and self.preset_window.winfo_exists():
             self.preset_window.lift()
             self.preset_window.focus_force()
@@ -112,52 +120,46 @@ class AutoClicker:
         win.transient(self.root)
         win.resizable(False, False)
         win.attributes("-topmost", True)
-        win.grab_set()          # 模态：主窗口暂时不可操作
+        win.grab_set()
 
-        frame = ttk.Frame(win, padding=14)
+        frame = ttk.Frame(win, padding=12)
         frame.pack(fill="both", expand=True)
 
         ttk.Label(
-            frame,
-            text="请选择一个预设（勾选即应用，单选）：",
+            frame, text="请选择一个预设（勾选即应用，单选）：",
             foreground="gray",
-        ).pack(anchor="w", pady=(0, 8))
+        ).pack(anchor="w", pady=(0, 6))
 
-        # 用 Checkbutton 实现单选效果
         self.preset_vars = []
         for name, cps, hold, desc in PRESETS:
             var = tk.BooleanVar(value=(name == self.current_preset))
             row = ttk.Frame(frame)
-            row.pack(fill="x", pady=2)
+            row.pack(fill="x", pady=1)
 
-            cb = ttk.Checkbutton(
+            ttk.Checkbutton(
                 row,
-                text=f"{name}  （{cps:g} CPS / 按住 {hold:g} ms）",
+                text=f"{name}  ({cps:g} CPS / {hold:g} ms)",
                 variable=var,
                 command=lambda n=name, c=cps, h=hold, v=var:
                     self._on_preset_check(n, c, h, v),
-            )
-            cb.pack(anchor="w")
+            ).pack(anchor="w")
             ttk.Label(row, text=f"    {desc}", foreground="gray").pack(
                 anchor="w", padx=(22, 0)
             )
             self.preset_vars.append((name, var, cps, hold))
 
-        ttk.Separator(frame, orient="horizontal").pack(fill="x", pady=10)
+        ttk.Separator(frame, orient="horizontal").pack(fill="x", pady=8)
         ttk.Button(frame, text="关闭", command=win.destroy).pack(anchor="e")
 
         self.preset_window = win
 
     def _on_preset_check(self, name, cps, hold, var):
-        """复选框的点选回调：实现单选逻辑"""
         if var.get():
-            # 勾选新的 -> 取消其他所有
             for n, v, _, _ in self.preset_vars:
                 if n != name:
                     v.set(False)
             self._apply_preset(name, cps, hold)
         else:
-            # 想取消唯一勾选项 -> 不允许，重新勾上
             var.set(True)
 
     # ==================== 全局热键 ====================
@@ -173,7 +175,6 @@ class AutoClicker:
             self.root.after(0, self._on_esc)
 
     def _on_esc(self):
-        # 预设弹窗打开时，ESC 只关闭弹窗；否则退出程序
         if self.preset_window is not None and self.preset_window.winfo_exists():
             self.preset_window.destroy()
             self.preset_window = None
@@ -223,7 +224,7 @@ class AutoClicker:
         self.running = True
         self.status.config(
             text=f"运行中 [{self.current_preset or '手动调整'}]  "
-                 f"{cps:g} CPS / 按住 {hold*1000:.1f} ms",
+                 f"{cps:g} CPS / {hold*1000:.1f} ms",
             foreground="green",
         )
         self.btn.config(text="停止 (F8)")
