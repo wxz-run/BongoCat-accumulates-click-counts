@@ -113,7 +113,6 @@ class AutoClicker:
             command=lambda: self._begin_capture("stop"),
         ).pack(side="right")
 
-        # 主窗口按钮：只出现在空闲态，点击 = 进入运行
         self.btn = ttk.Button(main, text="启动 (F8)", command=self.start)
         self.btn.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
@@ -125,8 +124,9 @@ class AutoClicker:
             command=self._on_topmost_toggle,
         ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
+        # ESC 不再退出，提示里改为「右键球→退出」
         self.hint_label = ttk.Label(
-            main, text="F8 启动/暂停   ESC 退出", foreground="gray"
+            main, text="F8 启动/暂停 | 右键球→退出", foreground="gray"
         )
         self.hint_label.grid(row=8, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
@@ -196,12 +196,16 @@ class AutoClicker:
         target = self.capture_target
         if target is None:
             return
+        # ESC 只取消捕获，不退出
         if key == keyboard.Key.esc:
             self._cancel_capture()
             return
         if key == keyboard.Key.f9:
             self._show_capture_hint(target, "F9 已占用，请换一个…")
             return
+        if isinstance(key, Button) and key == keyboard.Key.esc:
+            # 占位，无意义
+            pass
         if isinstance(key, Button) and key == Button.left:
             self._show_capture_hint(target, "左键不可用，请换一个…")
             return
@@ -269,11 +273,11 @@ class AutoClicker:
     def _refresh_button_and_hint(self):
         self.btn.config(text=f"启动 ({self.start_key_name})")
         if self._is_toggle_mode():
-            hint = f"{self.start_key_name} 启动/暂停   F9 暂停   ESC 退出"
+            hint = f"{self.start_key_name} 启动/暂停 | 右键球→退出"
         else:
             hint = (
-                f"{self.start_key_name} 启动/结束   "
-                f"{self.stop_key_name} 暂停   ESC 退出"
+                f"{self.start_key_name}/{self.stop_key_name} 启/停 "
+                f"| 右键球→退出"
             )
         self.hint_label.config(text=hint)
 
@@ -389,7 +393,6 @@ class AutoClicker:
         def on_release(e):
             if state["moved"]:
                 return
-            # 三态切换：空闲 → 运行 → 暂停 → 运行 ...
             if not self.running:
                 self.start()
             else:
@@ -503,10 +506,11 @@ class AutoClicker:
             self._handle_capture(key)
             return
 
-        # F9 暂停 / ESC 退出优先
+        # F9 暂停优先
         if key == keyboard.Key.f9:
             self.toggle_pause()
             return
+        # ESC 只关弹窗 / 取消捕获，不再退出
         if key == keyboard.Key.esc:
             self._on_esc()
             return
@@ -518,21 +522,19 @@ class AutoClicker:
             return
 
         if self._is_toggle_mode():
-            # 启停同键：三态循环（空闲→运行→暂停→运行...），永不自动回主窗口
             if not self.running:
                 self.start()
             else:
                 self.toggle_pause()
         else:
-            # 启停分离
             if is_start:
                 if not self.running:
                     self.start()
                 else:
-                    self.stop()          # 结束运行 → 显示主窗口
+                    self.stop()
             elif is_stop:
                 if self.running:
-                    self.toggle_pause()  # 运行↔暂停（不显示主窗口）
+                    self.toggle_pause()
 
     def on_press(self, key):
         self.root.after(0, lambda k=key: self._dispatch_key(k))
@@ -543,13 +545,13 @@ class AutoClicker:
         self.root.after(0, lambda b=button: self._dispatch_key(b))
 
     def _on_esc(self):
+        """ESC：仅关闭弹窗 / 取消捕获，不退出程序"""
         if self.preset_window is not None and self.preset_window.winfo_exists():
             self.preset_window.destroy()
             self.preset_window = None
         elif self.capturing:
             self._cancel_capture()
-        else:
-            self.quit()
+        # 否则什么都不做
 
     # ==================== 暂停 / 继续 ====================
     def toggle_pause(self):
@@ -627,13 +629,11 @@ class AutoClicker:
         self.click_thread = threading.Thread(target=self.click_loop, daemon=True)
         self.click_thread.start()
 
-        # 隐藏主窗口（悬浮球保持常驻）
         self.root.withdraw()
         self._update_ball_visual()
         self._pulse_ball()
 
     def stop(self):
-        """结束运行：回到空闲状态并显示主窗口"""
         self.running = False
         self.paused = False
         try:
