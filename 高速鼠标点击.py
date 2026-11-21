@@ -2,7 +2,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
 import time
-from pynput.mouse import Controller, Button
+from pynput.mouse import Controller, Button, Listener as MouseListener
 from pynput import keyboard
 
 
@@ -40,7 +40,7 @@ class AutoClicker:
         self.hold_var = tk.StringVar(value="10")
         self._suppress_trace = False
 
-        # 启动键
+        # 启动键：可以是 keyboard.Key / keyboard.KeyCode / mouse.Button
         self.start_key = keyboard.Key.f8
         self.start_key_name = "F8"
         self.capturing = False
@@ -144,6 +144,7 @@ class AutoClicker:
     # ==================== 启动键捕获 ====================
     def start_capture(self):
         if self.capturing:
+            # 捕获中再次点「更改」→ 取消
             self.capturing = False
             self.key_label.config(text=self.start_key_name, foreground="blue")
             return
@@ -153,21 +154,58 @@ class AutoClicker:
         self.root.focus_force()
 
     def _handle_capture(self, key):
+        """统一处理捕获（键盘或鼠标按键）"""
+        # ESC 取消
         if key == keyboard.Key.esc:
             self.capturing = False
             self.key_label.config(text=self.start_key_name, foreground="blue")
             return
+        # F9 保留给暂停，不允许
         if key == keyboard.Key.f9:
-            # F9 是保留的暂停键，忽略并保持捕获状态
             self.key_label.config(text="F9 已占用，请换一个…", foreground="orange")
+            self.root.after(1500, self._restore_capture_hint)
             return
+        # 左键拒绝（会与界面按钮自相干扰）
+        if isinstance(key, Button) and key == Button.left:
+            self.key_label.config(
+                text="左键不可用，请换一个…", foreground="orange"
+            )
+            self.root.after(1500, self._restore_capture_hint)
+            return
+
+        # 接受为新启动键
         self.start_key = key
         self.start_key_name = self._key_display_name(key)
         self.capturing = False
         self.key_label.config(text=self.start_key_name, foreground="blue")
         self._refresh_button_and_hint()
 
+    def _restore_capture_hint(self):
+        if self.capturing:
+            self.key_label.config(text="按下按键…", foreground="orange")
+
     def _key_display_name(self, key):
+        # 鼠标按键
+        if isinstance(key, Button):
+            mapping = {
+                Button.middle: "中键",
+                Button.right: "右键",
+            }
+            if key in mapping:
+                return mapping[key]
+            name = key.name  # 'x1', 'x2', 'button8', ...
+            if name.startswith("x"):
+                return f"侧键{name[1:]}"
+            if name.startswith("button"):
+                n = name[6:]
+                if n == "8":
+                    return "侧键1"
+                if n == "9":
+                    return "侧键2"
+                return f"鼠标{n}"
+            return f"鼠标-{name}"
+
+        # 键盘功能键
         if isinstance(key, keyboard.Key):
             name = key.name
             for suffix in ("_l", "_r"):
@@ -175,6 +213,8 @@ class AutoClicker:
                     name = name[: -len(suffix)]
                     break
             return name.upper()
+
+        # 字符键
         if isinstance(key, keyboard.KeyCode):
             if key.char:
                 return key.char.upper()
@@ -185,6 +225,9 @@ class AutoClicker:
     def _keys_equal(self, k1, k2):
         if k1 is k2:
             return True
+        # 鼠标按键只与鼠标按键比较（Key 和 Button 都是 Enum，要防串比）
+        if isinstance(k1, Button) or isinstance(k2, Button):
+            return isinstance(k1, Button) and isinstance(k2, Button) and k1 == k2
         if isinstance(k1, keyboard.Key) and isinstance(k2, keyboard.Key):
             return k1 == k2
         if isinstance(k1, keyboard.KeyCode) and isinstance(k2, keyboard.KeyCode):
@@ -331,14 +374,12 @@ class AutoClicker:
         self.ball_circle = circle
         self.ball_value_item = value_item
 
-        # 若启动时就是暂停态（理论上不会，但保险起见）
         if self.paused:
             self._update_ball_visual()
         else:
             self._pulse_ball()
 
     def _update_ball_visual(self):
-        """根据 paused 状态刷新悬浮球外观"""
         if self.ball_canvas is None or self.ball_window is None:
             return
         try:
@@ -386,13 +427,20 @@ class AutoClicker:
         self.ball_circle = None
         self.ball_value_item = None
 
-    # ==================== 全局热键 ====================
+    # ==================== 全局热键（键盘 + 鼠标） ====================
     def _setup_hotkeys(self):
+        # 键盘
         self.listener = keyboard.Listener(on_press=self.on_press)
         self.listener.daemon = True
         self.listener.start()
 
+        # 鼠标（侧键 / 中键 / 右键需要这里）
+        self.mouse_listener = MouseListener(on_click=self.on_click)
+        self.mouse_listener.daemon = True
+        self.mouse_listener.start()
+
     def on_press(self, key):
+        """键盘回调"""
         if self.capturing:
             self.root.after(0, lambda k=key: self._handle_capture(k))
             return
@@ -402,6 +450,16 @@ class AutoClicker:
             self.root.after(0, self.toggle_pause)
         elif key == keyboard.Key.esc:
             self.root.after(0, self._on_esc)
+
+    def on_click(self, x, y, button, pressed):
+        """鼠标回调（press 和 release 都会调用，只处理 press）"""
+        if not pressed:
+            return
+        if self.capturing:
+            self.root.after(0, lambda b=button: self._handle_capture(b))
+            return
+        if self._keys_equal(button, self.start_key):
+            self.root.after(0, self.toggle)
 
     def _on_esc(self):
         if self.preset_window is not None and self.preset_window.winfo_exists():
@@ -416,7 +474,7 @@ class AutoClicker:
     # ==================== 暂停 / 继续 ====================
     def toggle_pause(self):
         if not self.running:
-            return  # 未运行时 F9 无效果
+            return
         self.paused = not self.paused
 
         if self.paused:
@@ -431,7 +489,7 @@ class AutoClicker:
                 foreground="green",
             )
             self._update_ball_visual()
-            self._pulse_ball()  # 重启呼吸
+            self._pulse_ball()
 
     # ==================== 开始 / 停止 ====================
     def toggle(self):
@@ -510,7 +568,6 @@ class AutoClicker:
     # ==================== 点击循环 ====================
     def click_loop(self):
         while self.running:
-            # 暂停：短暂等待，不点击
             while self.running and self.paused:
                 time.sleep(0.02)
             if not self.running:
@@ -542,10 +599,11 @@ class AutoClicker:
             self.mouse.release(Button.left)
         except Exception:
             pass
-        try:
-            self.listener.stop()
-        except Exception:
-            pass
+        for lst in (self.listener, self.mouse_listener):
+            try:
+                lst.stop()
+            except Exception:
+                pass
         if self.preset_window is not None and self.preset_window.winfo_exists():
             try:
                 self.preset_window.destroy()
