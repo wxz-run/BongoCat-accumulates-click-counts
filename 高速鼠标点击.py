@@ -2,7 +2,6 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
 import time
-import sys
 from pynput.mouse import Controller, Button
 from pynput import keyboard
 
@@ -27,6 +26,7 @@ class AutoClicker:
 
         self.mouse = Controller()
         self.running = False
+        self.paused = False
         self.cps = 10.0
         self.hold = 0.01
         self.interval = 0.1
@@ -52,6 +52,7 @@ class AutoClicker:
         self.ball_window = None
         self.ball_canvas = None
         self.ball_circle = None
+        self.ball_value_item = None
 
         self._build_ui()
         self._setup_hotkeys()
@@ -108,7 +109,7 @@ class AutoClicker:
         ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         self.hint_label = ttk.Label(
-            main, text="F8 开始/停止    ESC 退出", foreground="gray"
+            main, text="F8 启停   F9 暂停   ESC 退出", foreground="gray"
         )
         self.hint_label.grid(row=7, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
@@ -156,6 +157,10 @@ class AutoClicker:
             self.capturing = False
             self.key_label.config(text=self.start_key_name, foreground="blue")
             return
+        if key == keyboard.Key.f9:
+            # F9 是保留的暂停键，忽略并保持捕获状态
+            self.key_label.config(text="F9 已占用，请换一个…", foreground="orange")
+            return
         self.start_key = key
         self.start_key_name = self._key_display_name(key)
         self.capturing = False
@@ -194,7 +199,7 @@ class AutoClicker:
         action = "停止" if self.running else "开始"
         self.btn.config(text=f"{action} ({self.start_key_name})")
         self.hint_label.config(
-            text=f"{self.start_key_name} 开始/停止    ESC 退出"
+            text=f"{self.start_key_name} 启停   F9 暂停   ESC 退出"
         )
 
     # ==================== 预设弹窗 ====================
@@ -256,20 +261,17 @@ class AutoClicker:
             return
 
         win = tk.Toplevel(self.root)
-        win.overrideredirect(True)                # 去标题栏
+        win.overrideredirect(True)
         win.attributes("-topmost", self.topmost_var.get())
 
         size = 64
-        transparent_key = "#010203"               # 透明色，几乎不会撞色
-
-        # 尝试做真圆（Windows 支持 -transparentcolor）
+        transparent_key = "#010203"
         bg = "#2c3e50"
         try:
             win.config(bg=transparent_key)
             win.attributes("-transparentcolor", transparent_key)
             bg = transparent_key
         except tk.TclError:
-            # 非 Windows 或失败 → 用深色方形底
             win.config(bg=bg)
 
         canvas = tk.Canvas(
@@ -284,19 +286,17 @@ class AutoClicker:
             size // 2, 20, text="CPS", fill="white",
             font=("Arial", 7, "bold")
         )
-        canvas.create_text(
+        value_item = canvas.create_text(
             size // 2, 40, text=f"{self.cps:g}", fill="white",
             font=("Arial", 14, "bold")
         )
 
-        # 默认位置：屏幕右下角，任务栏上方
         sw = win.winfo_screenwidth()
         sh = win.winfo_screenheight()
         x = sw - size - 30
         y = sh - size - 80
         win.geometry(f"{size}x{size}+{x}+{y}")
 
-        # 拖动 / 单击停止 / 右键退出
         state = {"ox": 0, "oy": 0, "sx": 0, "sy": 0, "moved": False}
 
         def on_press(e):
@@ -329,9 +329,30 @@ class AutoClicker:
         self.ball_window = win
         self.ball_canvas = canvas
         self.ball_circle = circle
+        self.ball_value_item = value_item
 
-        # 呼吸脉冲动画
-        self._pulse_ball()
+        # 若启动时就是暂停态（理论上不会，但保险起见）
+        if self.paused:
+            self._update_ball_visual()
+        else:
+            self._pulse_ball()
+
+    def _update_ball_visual(self):
+        """根据 paused 状态刷新悬浮球外观"""
+        if self.ball_canvas is None or self.ball_window is None:
+            return
+        try:
+            if not self.ball_window.winfo_exists():
+                return
+        except tk.TclError:
+            return
+
+        if self.paused:
+            self.ball_canvas.itemconfig(self.ball_circle, fill="#f39c12")
+            self.ball_canvas.itemconfig(self.ball_value_item, text="II")
+        else:
+            self.ball_canvas.itemconfig(self.ball_circle, fill="#3498db")
+            self.ball_canvas.itemconfig(self.ball_value_item, text=f"{self.cps:g}")
 
     def _pulse_ball(self):
         if self.ball_window is None:
@@ -341,7 +362,7 @@ class AutoClicker:
                 return
         except tk.TclError:
             return
-        if not self.running:
+        if not self.running or self.paused:
             return
         self._ball_pulse_state = not getattr(self, "_ball_pulse_state", False)
         color = "#3498db" if self._ball_pulse_state else "#2471a3"
@@ -363,6 +384,7 @@ class AutoClicker:
         self.ball_window = None
         self.ball_canvas = None
         self.ball_circle = None
+        self.ball_value_item = None
 
     # ==================== 全局热键 ====================
     def _setup_hotkeys(self):
@@ -376,6 +398,8 @@ class AutoClicker:
             return
         if self._keys_equal(key, self.start_key):
             self.root.after(0, self.toggle)
+        elif key == keyboard.Key.f9:
+            self.root.after(0, self.toggle_pause)
         elif key == keyboard.Key.esc:
             self.root.after(0, self._on_esc)
 
@@ -389,6 +413,26 @@ class AutoClicker:
         else:
             self.quit()
 
+    # ==================== 暂停 / 继续 ====================
+    def toggle_pause(self):
+        if not self.running:
+            return  # 未运行时 F9 无效果
+        self.paused = not self.paused
+
+        if self.paused:
+            self.status.config(
+                text="状态: 已暂停（按 F9 继续）", foreground="orange"
+            )
+            self._update_ball_visual()
+        else:
+            self.status.config(
+                text=f"运行中 [{self.current_preset or '手动调整'}]  "
+                     f"{self.cps:g} CPS / {self.hold*1000:.1f} ms",
+                foreground="green",
+            )
+            self._update_ball_visual()
+            self._pulse_ball()  # 重启呼吸
+
     # ==================== 开始 / 停止 ====================
     def toggle(self):
         if self.running:
@@ -397,7 +441,6 @@ class AutoClicker:
             self.start()
 
     def start(self):
-        # 关闭可能的预设弹窗
         if self.preset_window is not None and self.preset_window.winfo_exists():
             try:
                 self.preset_window.destroy()
@@ -436,21 +479,26 @@ class AutoClicker:
         self.cps = cps
         self.interval = interval
         self.hold = hold
+        self.paused = False
 
         self.running = True
         self.btn.config(text=f"停止 ({self.start_key_name})")
+        self.status.config(
+            text=f"运行中 [{self.current_preset or '手动调整'}]  "
+                 f"{cps:g} CPS / {hold*1000:.1f} ms",
+            foreground="green",
+        )
 
         self.click_thread = threading.Thread(target=self.click_loop, daemon=True)
         self.click_thread.start()
 
-        # 隐藏主窗口 → 显示悬浮球
         self.root.withdraw()
         self._show_ball()
 
     def stop(self):
         self.running = False
+        self.paused = False
         self._hide_ball()
-        # 恢复主窗口
         try:
             self.root.deiconify()
             self.root.lift()
@@ -462,6 +510,12 @@ class AutoClicker:
     # ==================== 点击循环 ====================
     def click_loop(self):
         while self.running:
+            # 暂停：短暂等待，不点击
+            while self.running and self.paused:
+                time.sleep(0.02)
+            if not self.running:
+                break
+
             t0 = time.perf_counter()
             self.mouse.press(Button.left)
 
@@ -482,6 +536,7 @@ class AutoClicker:
     # ==================== 退出 ====================
     def quit(self):
         self.running = False
+        self.paused = False
         self._hide_ball()
         try:
             self.mouse.release(Button.left)
