@@ -20,15 +20,15 @@ class AutoClicker:
     def __init__(self, root):
         self.root = root
         self.root.title("自动点击器")
-        self.root.geometry("280x225")
+        self.root.geometry("280x285")
         self.root.resizable(False, False)
-        self.root.attributes("-topmost", True)
+        self.root.attributes("-topmost", True)   # 默认置顶
 
         self.mouse = Controller()
         self.running = False
         self.cps = 10.0
-        self.hold = 0.01        # 秒
-        self.interval = 0.1     # 秒
+        self.hold = 0.01
+        self.interval = 0.1
         self.click_thread = None
 
         self.current_preset = "自定义"
@@ -39,17 +39,25 @@ class AutoClicker:
         self.hold_var = tk.StringVar(value="10")
         self._suppress_trace = False
 
+        # —— 启动键 ——
+        self.start_key = keyboard.Key.f8
+        self.start_key_name = "F8"
+        self.capturing = False
+
+        # —— 始终置顶 ——
+        self.topmost_var = tk.BooleanVar(value=True)
+
         self._build_ui()
         self._setup_hotkeys()
         self.root.protocol("WM_DELETE_WINDOW", self.quit)
 
-    # ==================== 主界面（紧凑） ====================
+    # ==================== 主界面 ====================
     def _build_ui(self):
         main = ttk.Frame(self.root, padding=8)
         main.pack(fill="both", expand=True)
         main.columnconfigure(1, weight=1)
 
-        # —— 预设行 ——
+        # row0: 预设
         preset_row = ttk.Frame(main)
         preset_row.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
         ttk.Label(preset_row, text="预设:").pack(side="left")
@@ -62,13 +70,13 @@ class AutoClicker:
             command=self.open_preset_window,
         ).pack(side="right")
 
-        # —— CPS（标签+输入框同一行）——
+        # row1: CPS
         ttk.Label(main, text="CPS:").grid(row=1, column=0, sticky="w")
         ttk.Entry(main, textvariable=self.cps_var, width=8).grid(
             row=1, column=1, sticky="e"
         )
 
-        # —— 按住时长 ——
+        # row2: 按住时长
         ttk.Label(main, text="按住(ms):").grid(
             row=2, column=0, sticky="w", pady=(4, 0)
         )
@@ -76,22 +84,52 @@ class AutoClicker:
             row=2, column=1, sticky="e", pady=(4, 0)
         )
 
-        # —— 开始 / 停止 ——
+        # row3: 启动键
+        key_row = ttk.Frame(main)
+        key_row.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        ttk.Label(key_row, text="启动键:").pack(side="left")
+        self.key_label = ttk.Label(key_row, text=self.start_key_name, foreground="blue")
+        self.key_label.pack(side="left", padx=(2, 0))
+        ttk.Button(
+            key_row, text="更改", width=6, command=self.start_capture
+        ).pack(side="right")
+
+        # row4: 开始/停止
         self.btn = ttk.Button(main, text="开始 (F8)", command=self.toggle)
-        self.btn.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        self.btn.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
-        # —— 状态 ——
+        # row5: 状态
         self.status = ttk.Label(main, text="状态: 已停止", foreground="red")
-        self.status.grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        self.status.grid(row=5, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
-        # —— 热键提示（合并成一行）——
-        ttk.Label(
+        # row6: 始终置顶（新增）
+        ttk.Checkbutton(
+            main,
+            text="始终置顶",
+            variable=self.topmost_var,
+            command=self._on_topmost_toggle,
+        ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
+        # row7: 热键提示
+        self.hint_label = ttk.Label(
             main, text="F8 开始/停止    ESC 退出", foreground="gray"
-        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        )
+        self.hint_label.grid(row=7, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         # 手动编辑参数 -> 预设标签变成「手动调整」
         self.cps_var.trace_add("write", self._on_param_edited)
         self.hold_var.trace_add("write", self._on_param_edited)
+
+    # ==================== 始终置顶 ====================
+    def _on_topmost_toggle(self):
+        on = self.topmost_var.get()
+        self.root.attributes("-topmost", on)
+        # 若弹窗开着，同步切换
+        if self.preset_window is not None and self.preset_window.winfo_exists():
+            try:
+                self.preset_window.attributes("-topmost", on)
+            except Exception:
+                pass
 
     def _on_param_edited(self, *args):
         if self._suppress_trace:
@@ -108,7 +146,64 @@ class AutoClicker:
         self._suppress_trace = False
         self.preset_label.config(text=name)
 
-    # ==================== 预设弹窗（与主窗口大小无关） ====================
+    # ==================== 启动键捕获 ====================
+    def start_capture(self):
+        if self.capturing:
+            self.capturing = False
+            self.key_label.config(text=self.start_key_name, foreground="blue")
+            return
+        self.capturing = True
+        self.key_label.config(text="按下按键…", foreground="orange")
+        self.root.lift()
+        self.root.focus_force()
+
+    def _handle_capture(self, key):
+        if key == keyboard.Key.esc:
+            self.capturing = False
+            self.key_label.config(text=self.start_key_name, foreground="blue")
+            return
+        self.start_key = key
+        self.start_key_name = self._key_display_name(key)
+        self.capturing = False
+        self.key_label.config(text=self.start_key_name, foreground="blue")
+        self._refresh_button_and_hint()
+
+    def _key_display_name(self, key):
+        if isinstance(key, keyboard.Key):
+            name = key.name
+            for suffix in ("_l", "_r"):
+                if name.endswith(suffix):
+                    name = name[: -len(suffix)]
+                    break
+            return name.upper()
+        if isinstance(key, keyboard.KeyCode):
+            if key.char:
+                return key.char.upper()
+            if key.vk is not None:
+                return f"VK{key.vk}"
+        return str(key)
+
+    def _keys_equal(self, k1, k2):
+        if k1 is k2:
+            return True
+        if isinstance(k1, keyboard.Key) and isinstance(k2, keyboard.Key):
+            return k1 == k2
+        if isinstance(k1, keyboard.KeyCode) and isinstance(k2, keyboard.KeyCode):
+            c1 = (k1.char or "").lower()
+            c2 = (k2.char or "").lower()
+            if c1 and c2:
+                return c1 == c2
+            return k1.vk is not None and k1.vk == k2.vk
+        return False
+
+    def _refresh_button_and_hint(self):
+        action = "停止" if self.running else "开始"
+        self.btn.config(text=f"{action} ({self.start_key_name})")
+        self.hint_label.config(
+            text=f"{self.start_key_name} 开始/停止    ESC 退出"
+        )
+
+    # ==================== 预设弹窗 ====================
     def open_preset_window(self):
         if self.preset_window is not None and self.preset_window.winfo_exists():
             self.preset_window.lift()
@@ -119,7 +214,8 @@ class AutoClicker:
         win.title("选择预设")
         win.transient(self.root)
         win.resizable(False, False)
-        win.attributes("-topmost", True)
+        # 跟随主窗口的置顶设置
+        win.attributes("-topmost", self.topmost_var.get())
         win.grab_set()
 
         frame = ttk.Frame(win, padding=12)
@@ -135,7 +231,6 @@ class AutoClicker:
             var = tk.BooleanVar(value=(name == self.current_preset))
             row = ttk.Frame(frame)
             row.pack(fill="x", pady=1)
-
             ttk.Checkbutton(
                 row,
                 text=f"{name}  ({cps:g} CPS / {hold:g} ms)",
@@ -169,7 +264,10 @@ class AutoClicker:
         self.listener.start()
 
     def on_press(self, key):
-        if key == keyboard.Key.f8:
+        if self.capturing:
+            self.root.after(0, lambda k=key: self._handle_capture(k))
+            return
+        if self._keys_equal(key, self.start_key):
             self.root.after(0, self.toggle)
         elif key == keyboard.Key.esc:
             self.root.after(0, self._on_esc)
@@ -178,6 +276,9 @@ class AutoClicker:
         if self.preset_window is not None and self.preset_window.winfo_exists():
             self.preset_window.destroy()
             self.preset_window = None
+        elif self.capturing:
+            self.capturing = False
+            self.key_label.config(text=self.start_key_name, foreground="blue")
         else:
             self.quit()
 
@@ -227,7 +328,7 @@ class AutoClicker:
                  f"{cps:g} CPS / {hold*1000:.1f} ms",
             foreground="green",
         )
-        self.btn.config(text="停止 (F8)")
+        self.btn.config(text=f"停止 ({self.start_key_name})")
 
         self.click_thread = threading.Thread(target=self.click_loop, daemon=True)
         self.click_thread.start()
@@ -235,21 +336,20 @@ class AutoClicker:
     def stop(self):
         self.running = False
         self.status.config(text="状态: 已停止", foreground="red")
-        self.btn.config(text="开始 (F8)")
+        self.btn.config(text=f"开始 ({self.start_key_name})")
 
     # ==================== 点击循环 ====================
     def click_loop(self):
         while self.running:
             t0 = time.perf_counter()
+            self.mouse.press(Button.left)
 
-            self.mouse.press(Button.left)          # 按下
-
-            while self.running:                    # 保持按住
+            while self.running:
                 if time.perf_counter() - t0 >= self.hold:
                     break
                 time.sleep(min(0.005, self.hold))
 
-            self.mouse.release(Button.left)        # 松开
+            self.mouse.release(Button.left)
 
             elapsed = time.perf_counter() - t0
             remaining = self.interval - elapsed
