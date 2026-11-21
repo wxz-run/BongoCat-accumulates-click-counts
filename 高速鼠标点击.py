@@ -2,6 +2,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
 import time
+import sys
 from pynput.mouse import Controller, Button
 from pynput import keyboard
 
@@ -22,7 +23,7 @@ class AutoClicker:
         self.root.title("自动点击器")
         self.root.geometry("280x285")
         self.root.resizable(False, False)
-        self.root.attributes("-topmost", True)   # 默认置顶
+        self.root.attributes("-topmost", True)
 
         self.mouse = Controller()
         self.running = False
@@ -39,13 +40,18 @@ class AutoClicker:
         self.hold_var = tk.StringVar(value="10")
         self._suppress_trace = False
 
-        # —— 启动键 ——
+        # 启动键
         self.start_key = keyboard.Key.f8
         self.start_key_name = "F8"
         self.capturing = False
 
-        # —— 始终置顶 ——
+        # 置顶
         self.topmost_var = tk.BooleanVar(value=True)
+
+        # 悬浮球引用
+        self.ball_window = None
+        self.ball_canvas = None
+        self.ball_circle = None
 
         self._build_ui()
         self._setup_hotkeys()
@@ -57,7 +63,6 @@ class AutoClicker:
         main.pack(fill="both", expand=True)
         main.columnconfigure(1, weight=1)
 
-        # row0: 预设
         preset_row = ttk.Frame(main)
         preset_row.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
         ttk.Label(preset_row, text="预设:").pack(side="left")
@@ -70,13 +75,11 @@ class AutoClicker:
             command=self.open_preset_window,
         ).pack(side="right")
 
-        # row1: CPS
         ttk.Label(main, text="CPS:").grid(row=1, column=0, sticky="w")
         ttk.Entry(main, textvariable=self.cps_var, width=8).grid(
             row=1, column=1, sticky="e"
         )
 
-        # row2: 按住时长
         ttk.Label(main, text="按住(ms):").grid(
             row=2, column=0, sticky="w", pady=(4, 0)
         )
@@ -84,7 +87,6 @@ class AutoClicker:
             row=2, column=1, sticky="e", pady=(4, 0)
         )
 
-        # row3: 启动键
         key_row = ttk.Frame(main)
         key_row.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(4, 0))
         ttk.Label(key_row, text="启动键:").pack(side="left")
@@ -94,42 +96,34 @@ class AutoClicker:
             key_row, text="更改", width=6, command=self.start_capture
         ).pack(side="right")
 
-        # row4: 开始/停止
         self.btn = ttk.Button(main, text="开始 (F8)", command=self.toggle)
         self.btn.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
-        # row5: 状态
         self.status = ttk.Label(main, text="状态: 已停止", foreground="red")
         self.status.grid(row=5, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
-        # row6: 始终置顶（新增）
         ttk.Checkbutton(
-            main,
-            text="始终置顶",
-            variable=self.topmost_var,
+            main, text="始终置顶", variable=self.topmost_var,
             command=self._on_topmost_toggle,
         ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
-        # row7: 热键提示
         self.hint_label = ttk.Label(
             main, text="F8 开始/停止    ESC 退出", foreground="gray"
         )
         self.hint_label.grid(row=7, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
-        # 手动编辑参数 -> 预设标签变成「手动调整」
         self.cps_var.trace_add("write", self._on_param_edited)
         self.hold_var.trace_add("write", self._on_param_edited)
 
-    # ==================== 始终置顶 ====================
     def _on_topmost_toggle(self):
         on = self.topmost_var.get()
         self.root.attributes("-topmost", on)
-        # 若弹窗开着，同步切换
-        if self.preset_window is not None and self.preset_window.winfo_exists():
-            try:
-                self.preset_window.attributes("-topmost", on)
-            except Exception:
-                pass
+        for w in (self.preset_window, self.ball_window):
+            if w is not None and w.winfo_exists():
+                try:
+                    w.attributes("-topmost", on)
+                except Exception:
+                    pass
 
     def _on_param_edited(self, *args):
         if self._suppress_trace:
@@ -214,7 +208,6 @@ class AutoClicker:
         win.title("选择预设")
         win.transient(self.root)
         win.resizable(False, False)
-        # 跟随主窗口的置顶设置
         win.attributes("-topmost", self.topmost_var.get())
         win.grab_set()
 
@@ -257,6 +250,120 @@ class AutoClicker:
         else:
             var.set(True)
 
+    # ==================== 悬浮球 ====================
+    def _show_ball(self):
+        if self.ball_window is not None and self.ball_window.winfo_exists():
+            return
+
+        win = tk.Toplevel(self.root)
+        win.overrideredirect(True)                # 去标题栏
+        win.attributes("-topmost", self.topmost_var.get())
+
+        size = 64
+        transparent_key = "#010203"               # 透明色，几乎不会撞色
+
+        # 尝试做真圆（Windows 支持 -transparentcolor）
+        bg = "#2c3e50"
+        try:
+            win.config(bg=transparent_key)
+            win.attributes("-transparentcolor", transparent_key)
+            bg = transparent_key
+        except tk.TclError:
+            # 非 Windows 或失败 → 用深色方形底
+            win.config(bg=bg)
+
+        canvas = tk.Canvas(
+            win, width=size, height=size, bg=bg, highlightthickness=0
+        )
+        canvas.pack()
+
+        circle = canvas.create_oval(
+            2, 2, size - 2, size - 2, fill="#3498db", outline="white", width=2
+        )
+        canvas.create_text(
+            size // 2, 20, text="CPS", fill="white",
+            font=("Arial", 7, "bold")
+        )
+        canvas.create_text(
+            size // 2, 40, text=f"{self.cps:g}", fill="white",
+            font=("Arial", 14, "bold")
+        )
+
+        # 默认位置：屏幕右下角，任务栏上方
+        sw = win.winfo_screenwidth()
+        sh = win.winfo_screenheight()
+        x = sw - size - 30
+        y = sh - size - 80
+        win.geometry(f"{size}x{size}+{x}+{y}")
+
+        # 拖动 / 单击停止 / 右键退出
+        state = {"ox": 0, "oy": 0, "sx": 0, "sy": 0, "moved": False}
+
+        def on_press(e):
+            state["ox"] = e.x_root - win.winfo_x()
+            state["oy"] = e.y_root - win.winfo_y()
+            state["sx"] = e.x_root
+            state["sy"] = e.y_root
+            state["moved"] = False
+
+        def on_drag(e):
+            if abs(e.x_root - state["sx"]) + abs(e.y_root - state["sy"]) > 3:
+                state["moved"] = True
+            nx = e.x_root - state["ox"]
+            ny = e.y_root - state["oy"]
+            win.geometry(f"+{nx}+{ny}")
+
+        def on_release(e):
+            if not state["moved"]:
+                self.stop()
+
+        def on_right_click(e):
+            self.quit()
+
+        for w in (win, canvas):
+            w.bind("<Button-1>", on_press)
+            w.bind("<B1-Motion>", on_drag)
+            w.bind("<ButtonRelease-1>", on_release)
+            w.bind("<Button-3>", on_right_click)
+
+        self.ball_window = win
+        self.ball_canvas = canvas
+        self.ball_circle = circle
+
+        # 呼吸脉冲动画
+        self._pulse_ball()
+
+    def _pulse_ball(self):
+        if self.ball_window is None:
+            return
+        try:
+            if not self.ball_window.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        if not self.running:
+            return
+        self._ball_pulse_state = not getattr(self, "_ball_pulse_state", False)
+        color = "#3498db" if self._ball_pulse_state else "#2471a3"
+        try:
+            self.ball_canvas.itemconfig(self.ball_circle, fill=color)
+        except tk.TclError:
+            return
+        try:
+            self.ball_window.after(600, self._pulse_ball)
+        except tk.TclError:
+            pass
+
+    def _hide_ball(self):
+        if self.ball_window is not None:
+            try:
+                self.ball_window.destroy()
+            except Exception:
+                pass
+        self.ball_window = None
+        self.ball_canvas = None
+        self.ball_circle = None
+
     # ==================== 全局热键 ====================
     def _setup_hotkeys(self):
         self.listener = keyboard.Listener(on_press=self.on_press)
@@ -290,6 +397,14 @@ class AutoClicker:
             self.start()
 
     def start(self):
+        # 关闭可能的预设弹窗
+        if self.preset_window is not None and self.preset_window.winfo_exists():
+            try:
+                self.preset_window.destroy()
+            except Exception:
+                pass
+            self.preset_window = None
+
         try:
             cps = float(self.cps_var.get().strip())
             if cps <= 0:
@@ -323,18 +438,24 @@ class AutoClicker:
         self.hold = hold
 
         self.running = True
-        self.status.config(
-            text=f"运行中 [{self.current_preset or '手动调整'}]  "
-                 f"{cps:g} CPS / {hold*1000:.1f} ms",
-            foreground="green",
-        )
         self.btn.config(text=f"停止 ({self.start_key_name})")
 
         self.click_thread = threading.Thread(target=self.click_loop, daemon=True)
         self.click_thread.start()
 
+        # 隐藏主窗口 → 显示悬浮球
+        self.root.withdraw()
+        self._show_ball()
+
     def stop(self):
         self.running = False
+        self._hide_ball()
+        # 恢复主窗口
+        try:
+            self.root.deiconify()
+            self.root.lift()
+        except tk.TclError:
+            pass
         self.status.config(text="状态: 已停止", foreground="red")
         self.btn.config(text=f"开始 ({self.start_key_name})")
 
@@ -361,6 +482,7 @@ class AutoClicker:
     # ==================== 退出 ====================
     def quit(self):
         self.running = False
+        self._hide_ball()
         try:
             self.mouse.release(Button.left)
         except Exception:
